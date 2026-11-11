@@ -1,0 +1,137 @@
+export const FIELD_NAMES = {
+  period: 'Период', service: 'Услуга', area: 'Площадь, м²', rate: 'Ставка, ₽/м²',
+  amount: 'Сумма, ₽', vat: 'НДС', basis: 'Единица тарифа',
+  change_requires_agreement: 'Изменение по соглашению', signed: 'Подписи обеих сторон',
+};
+
+const cell = (type) => ({ type: 'object', additionalProperties: false, properties: {
+  value: {type: [type, 'null']}, quote: {type: 'string'},
+}, required: ['value', 'quote'] });
+const documentSchema = {type: 'object', additionalProperties: false, properties: {
+  period: cell('string'), service: cell('string'), area: cell('number'), rate: cell('number'), amount: cell('number'),
+  vat: cell('string'), basis: cell('string'), change_requires_agreement: cell('boolean'), signed: cell('boolean'),
+}, required: Object.keys(FIELD_NAMES)};
+export const extractionSchema = {type: 'object', additionalProperties: false, properties: {
+  report: documentSchema, act: documentSchema, contract: documentSchema, amendment: documentSchema,
+  notes: {type: 'array', items: {type: 'string'}},
+}, required: ['report','act','contract','amendment','notes']};
+
+export function blankDocument() {
+  return Object.fromEntries(Object.keys(FIELD_NAMES).map(key => [key,{value: null,quote: ''}]));
+}
+const norm = text => String(text ?? '').replace(/\s+/g,' ').trim();
+const validPeriod = value => value === null || /^\d{4}-(0[1-9]|1[0-2])$/.test(value);
+const numFields = ['area','rate','amount'];
+const numberInQuote=(value,quote)=>[...quote.matchAll(/\d[\d \u00a0\u202f]*(?:[.,]\d+)?/g)].some(match=>Math.abs(Number(match[0].replace(/[ \u00a0\u202f]/g,'').replace(',','.'))-value)<0.00001);
+
+// Values enter the calculation only with an exact, source-backed quotation.
+export function validateExtraction(input, documents) {
+  if (!input || typeof input !== 'object') throw new Error('Модель не вернула структуру документов.');
+  const result = {notes: [], validation: []};
+  for (const id of ['report','act','contract','amendment']) {
+    const source = String(documents[id] || '');
+    const doc = input[id];
+    if (!doc || typeof doc !== 'object') throw new Error('В ответе отсутствует документ: '+id);
+    result[id] = blankDocument();
+    for (const key of Object.keys(FIELD_NAMES)) {
+      const field = doc[key];
+      if (!field || !Object.hasOwn(field,'value') || typeof field.quote !== 'string') throw new Error('Неполное поле: '+id+'.'+key);
+      let value = field.value;
+      if (value === null) continue;
+      if (numFields.includes(key) && (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1e12)) throw new Error('Недопустимое число: '+id+'.'+key);
+      if (['signed','change_requires_agreement'].includes(key) && typeof value !== 'boolean') throw new Error('Недопустимое логическое поле.');
+      if (!numFields.includes(key) && !['signed','change_requires_agreement'].includes(key) && typeof value !== 'string') throw new Error('Недопустимое текстовое поле.');
+      if (key === 'period' && !validPeriod(value)) { result.validation.push({document:id,field:key,message:'Не удалось однозначно определить месяц и год.'}); continue; }
+      if (key === 'vat' && !['included','excluded','unknown'].includes(value)) throw new Error('Неизвестный порядок НДС.');
+      if (key === 'basis' && !['monthly_per_m2','monthly_flat','unknown'].includes(value)) throw new Error('Неизвестная единица тарифа.');
+      if (!norm(field.quote) || !norm(source).includes(norm(field.quote))) {
+        result.validation.push({document:id,field:key,message:'Цитата не найдена в исходном тексте. Значение исключено из расчёта.'});
+        continue;
+      }
+      if (numFields.includes(key) && !numberInQuote(value,field.quote)) {
+        result.validation.push({document:id,field:key,message:'Число не подтверждено цитатой. Значение исключено из расчёта.'});
+        continue;
+      }
+      result[id][key] = {value,quote:field.quote};
+    }
+  }
+  // Free-form model notes are not promoted to audit findings.
+  return result;
+}
+
+export function audit(extraction, documents = {}) {
+  const findings = [], checks = [], questions = [];
+  const val = (id,key) => extraction[id]?.[key]?.value ?? null;
+  const evidence = (...items) => items.map(([document,field])=>({document,field,quote:extraction[document]?.[field]?.quote||'',manual:!!extraction[document]?.[field]?.manual}));
+  const rub = amount => new Intl.NumberFormat('ru-RU',{maximumFractionDigits:2}).format(amount)+' ₽';
+  const cents = n => Math.round((n+Number.EPSILON)*100);
+  const delta = (a,b) => (cents(a)-cents(b))/100;
+  const isNum = n => typeof n === 'number' && Number.isFinite(n);
+  const add = (id,level,title,detail,amount,refs,group) => findings.push({id,level,title,detail,amount,evidence:refs,group});
+  const missing = (id,title,detail,refs=[]) => add(id,'missing',title,detail,null,refs,'completeness');
+  const periodR = val('report','period'), periodA = val('act','period');
+  const serviceR=val('report','service'),serviceA=val('act','service'),serviceC=val('contract','service');
+  let comparableRA = true, comparableRC = true;
+  const simplify = s => String(s||'').toLowerCase().replace(/[^а-яёa-z0-9]/g,'');
+  if (!periodR || !periodA) { comparableRA=false; missing('period-missing','Период не установлен','Для сравнения отчёта и акта подтвердите месяц и год обоих документов.',evidence(['report','period'],['act','period'])); }
+  else if (periodR!==periodA) {comparableRA=false; missing('period-mismatch','Отчёт и акт относятся к разным периодам','Суммы за '+periodR+' и '+periodA+' не сравниваются.',evidence(['report','period'],['act','period']));}
+  if (!serviceR || !serviceA || simplify(serviceR)!==simplify(serviceA)) {comparableRA=false; missing('service-ra','Нужно сопоставить услугу отчёта и акта','Названия должны обозначать одну услугу. При необходимости подтвердите сопоставление в извлечённых данных.',evidence(['report','service'],['act','service']));}
+  if (!serviceR || !serviceC || simplify(serviceR)!==simplify(serviceC)) {comparableRC=false; missing('service-rc','Нужно сопоставить услугу и договор','Договорный тариф нельзя применять, пока не подтверждена одна и та же услуга.',evidence(['report','service'],['contract','service']));}
+
+  for (const id of ['report','act']) {
+    const area=val(id,'area'),rate=val(id,'rate'),amount=val(id,'amount');
+    if (isNum(area)&&isNum(rate)&&isNum(amount)&&val(id,'basis')==='monthly_per_m2') {
+      const expected=cents(area*rate)/100, difference=delta(amount,expected);
+      if (Math.abs(difference)>0.01) add(id+'-math','issue','Арифметика '+(id==='report'?'начисления':'акта')+' не сходится', 'Площадь × ставка = '+rub(expected)+', в документе '+rub(amount)+'. Проверьте единицы, округление и корректировки.',difference,evidence([id,'area'],[id,'rate'],[id,'amount']),'arithmetic');
+      else checks.push({id:id+'-math',title:'Арифметика '+(id==='report'?'отчёта':'акта')+' сходится',detail:area+' м² × '+rate+' ₽ = '+rub(amount),evidence:evidence([id,'area'],[id,'rate'],[id,'amount'])});
+    }
+  }
+
+  if(comparableRA&&isNum(val('report','area'))&&isNum(val('act','area'))&&Math.abs(val('report','area')-val('act','area'))>0.001) {
+    add('area-mismatch','review','Площади отчёта и акта различаются','В отчёте '+val('report','area')+' м², в акте '+val('act','area')+' м². Уточните объём работ и соответствие документов.',null,evidence(['report','area'],['act','area']),'scope');
+  }
+
+  if (comparableRA && isNum(val('report','amount'))&&isNum(val('act','amount'))) {
+    const vr=val('report','vat'),va=val('act','vat');
+    if (!vr||!va||vr==='unknown'||va==='unknown'||vr!==va) missing('vat-ra','Уточните сопоставимость сумм по НДС','Разность отчёта и акта не рассчитана: порядок НДС неизвестен или различается. При необходимости подтвердите его вручную.',evidence(['report','vat'],['act','vat']));
+    else {
+      const difference=delta(val('report','amount'),val('act','amount'));
+      if (Math.abs(difference)>0.01) add('amount-mismatch','issue','Начисление расходится с актом','Отчёт: '+rub(val('report','amount'))+'. Акт: '+rub(val('act','amount'))+'. Разность не является автоматически установленной переплатой.',difference,evidence(['report','amount'],['act','amount'],['report','vat'],['act','vat']),'same-charge');
+      else checks.push({id:'amount-match',title:'Сумма отчёта совпадает с актом',detail:rub(val('act','amount')),evidence:evidence(['report','amount'],['act','amount'])});
+    }
+  } else if (!isNum(val('act','amount'))) missing('act-missing','Нет суммы акта для сверки','Загрузите акт или подтвердите отсутствие документа. Отсутствие в комплекте не доказывает отсутствие акта вообще.');
+
+  let appliedRate=val('contract','rate');
+  const amendmentText=String(documents.amendment||'').trim();
+  if (amendmentText) {
+    if (val('amendment','signed')===true && isNum(val('amendment','rate')) && val('amendment','period') && periodR && val('amendment','period')<=periodR) {
+      appliedRate=val('amendment','rate');
+      checks.push({id:'amendment-applied',title:'Учтено изменение тарифа',detail:'По предоставленным сведениям: ставка '+appliedRate+' ₽/м² с '+val('amendment','period')+'. Подписи и применимость проверяет сотрудник.',evidence:evidence(['amendment','signed'],['amendment','rate'],['amendment','period'])});
+    } else missing('amendment-unclear','Изменение тарифа требует проверки','Документ об изменении загружен, но подписи, дата действия или новая ставка не подтверждены. Автоматический вывод об отсутствии основания не делается.',evidence(['amendment','signed'],['amendment','period'],['amendment','rate']));
+  }
+  if(comparableRA&&comparableRC&&isNum(appliedRate)&&isNum(val('act','area'))&&isNum(val('act','amount'))&&val('contract','basis')==='monthly_per_m2'&&val('act','vat')&&val('act','vat')!=='unknown'&&val('act','vat')===val('contract','vat')&&val('act','rate')===null) {
+    const expected=cents(val('act','area')*appliedRate)/100,difference=delta(val('act','amount'),expected);
+    if(Math.abs(difference)>0.01)add('act-contract-math','review','Сумма акта отличается от договорного расчёта','По указанной площади и тарифу получается '+rub(expected)+', в акте '+rub(val('act','amount'))+'. Уточните корректировки, объём работ и применимость тарифа.',difference,evidence(['act','area'],['act','amount'],['contract','rate'],['contract','basis']),'same-charge');
+    else checks.push({id:'act-contract-match',title:'Сумма акта соответствует договорному расчёту',detail:val('act','area')+' м² × '+appliedRate+' ₽ = '+rub(expected),evidence:evidence(['act','area'],['act','amount'],['contract','rate'])});
+  }
+  if (comparableRC && isNum(appliedRate)&&isNum(val('report','rate'))) {
+    const vr=val('report','vat'),vc=val('contract','vat'),basis=val('contract','basis');
+    if (basis!=='monthly_per_m2') missing('basis-unknown','Подтвердите единицу договорного тарифа','Нужна ставка за м² в месяц. Суточные и разовые тарифы автоматически не приводятся.',evidence(['contract','basis']));
+    else if (!vr||!vc||vr==='unknown'||vc==='unknown'||vr!==vc) missing('vat-rc','Договорная ставка пока несопоставима','Уточните, включён ли НДС в договорную ставку и начисление. Дополнительный налог автоматически не добавляется.',evidence(['report','vat'],['contract','vat']));
+    else {
+      const rateDifference=delta(val('report','rate'),appliedRate);
+      if (Math.abs(rateDifference)>0.001) {
+        const higher=rateDifference>0;
+        const amount=isNum(val('report','area'))?cents(val('report','area')*rateDifference)/100:null;
+        const requirement=val('contract','change_requires_agreement');
+        const detail='В отчёте '+val('report','rate')+' ₽/м², применимый по представленным данным тариф '+appliedRate+' ₽/м².'+(isNum(amount)?' Разность по площади: '+rub(amount)+'.':'')+(requirement===true&&!amendmentText?' Договор требует согласованного изменения; подтверждающий документ не загружен.':' Проверьте основания и применимость изменения.');
+        add('rate-mismatch',higher?'issue':'review',higher?'Ставка выше подтверждённого тарифа':'Ставка ниже подтверждённого тарифа',detail,amount,evidence(['report','rate'],['report','area'],['contract','rate'],['contract','change_requires_agreement']),'same-charge');
+      } else checks.push({id:'rate-match',title:'Ставка соответствует представленным условиям',detail:appliedRate+' ₽/м² в месяц',evidence:evidence(['report','rate'],['contract','rate'])});
+    }
+  } else if (!isNum(appliedRate)) missing('contract-rate-missing','Не установлена договорная ставка','Добавьте договорные условия или проверьте извлечённые значения.');
+  for (const item of extraction.validation||[]) missing('quote-'+item.document+'-'+item.field,'Значение требует подтверждения',FIELD_NAMES[item.field]+': '+item.message);
+  if (findings.some(f=>f.id==='rate-mismatch')) questions.push('Предоставить подписанное основание изменения тарифа с датой начала действия либо пояснить расчёт начисления.');
+  if (findings.some(f=>f.id==='amount-mismatch')) questions.push('Объяснить разницу между отчётом и актом за один период; при необходимости представить корректировку.');
+  if (findings.some(f=>['act-math','act-contract-math'].includes(f.id))) questions.push('Уточнить площадь, ставку и корректировки в акте: сумма отличается от расчёта по представленным условиям.');
+  return {findings,checks,questions,notice:'Замечания относятся к предоставленному комплекту. Связанные разницы не складываются. Экономия, переплата и нарушение не установлены автоматически.'};
+}
