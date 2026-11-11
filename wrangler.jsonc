@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "egas-expense-audit",
+  "main": "dist/server/index.js",
+  "compatibility_date": "2026-11-11",
+  "account_id": "11fac3d8317c56979ec6e5bf7b6616ff",
+  "workers_dev": true,
+  "upload_source_maps": false,
+  "send_metrics": false,
+  "vars": {
+    "OPENROUTER_MODEL": "openai/gpt-4.1-mini"
+  }
+}

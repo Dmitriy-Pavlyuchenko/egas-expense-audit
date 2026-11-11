@@ -10,9 +10,13 @@
     "build": "node scripts/build.mjs",
     "dev": "node scripts/preview.mjs",
     "test": "node --test tests/*.test.mjs",
-    "validate": "node scripts/validate-artifact.mjs"
+    "validate": "node scripts/validate-artifact.mjs",
+    "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
     "pdfjs-dist": "5.6.205"
+  },
+  "devDependencies": {
+    "wrangler": "4.160.1"
   }
 }
