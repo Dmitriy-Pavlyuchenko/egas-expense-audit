@@ -31,7 +31,7 @@ function renderResults(){if(!state.extraction)return;updateSteps();state.result=
   $('results-content').hidden=false;$('results-empty').hidden=true;$('result-mode').textContent=state.mode==='ai'?'Извлечено ИИ · '+state.model:'Учебный режим';
   $('summary-report').textContent=money(state.extraction.report.amount.value);$('summary-act').textContent=money(state.extraction.act.amount.value);$('summary-findings').textContent=String(result.findings.length);
   fieldTable();renderReviewTasks();
-  $('findings-count').textContent=result.findings.length+' замечаний';
+  $('findings-count').textContent=result.findings.length+' '+({one:'замечание',few:'замечания',many:'замечаний',other:'замечания'}[new Intl.PluralRules('ru-RU').select(result.findings.length)]);
   $('findings').innerHTML=result.findings.length?result.findings.map(f=>{
     const view=findingPresentation(f,state.extraction),key=requestKey(f.id),draft=state.requestDrafts[key]??findingRequest(f,state.extraction,state.cases[state.activeCase].label,state.bundleInfo.period);
     const comparisons=view.comparisons.length?'<dl class="finding-comparison">'+view.comparisons.map(c=>'<div><dt>'+esc(c.label)+'</dt><dd>'+esc(c.value)+'</dd></div>').join('')+'</dl>':'';
