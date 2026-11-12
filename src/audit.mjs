@@ -169,6 +169,8 @@ export function audit(extraction, documents = {}) {
   for (const item of extraction.validation||[]) {
     if(item.field==='change_requires_agreement'&&(item.document!=='contract'||!rateChangeNeedsReview(extraction)))continue;
     if(item.field==='signed'&&item.document!=='amendment')continue;
+    if(item.document==='contract'&&['period','area','amount'].includes(item.field))continue;
+    if(item.document==='act'&&item.field==='basis'&&!isNum(val('act','rate')))continue;
     if(item.document==='amendment'&&!amendmentRelevant)continue;
     if(item.document==='amendment'&&findings.some(f=>f.id==='amendment-unclear'))continue;
     missing('quote-'+item.document+'-'+item.field,'Значение требует подтверждения',FIELD_NAMES[item.field]+': '+item.message);

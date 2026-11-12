@@ -35,3 +35,9 @@ test('When signatures and rate are known, the unresolved start date is named dir
  const s=sample('march');s.documents.amendment='Подписанное изменение тарифа.';s.extraction.amendment.signed.value=true;s.extraction.amendment.rate.value=65;
  const review=amendmentReview(s.extraction,s.documents);assert.equal(review.title,'Не определено начало действия новой ставки');assert.deepEqual(review.fields,['period']);assert.equal(review.addDocument,false);
 });
+test('Act tariff unit is only a clarification when an act rate is available for arithmetic',()=>{
+ const s=sample('clean');s.extraction.act.basis={value:'monthly_per_m2',quote:'нет такой цитаты'};
+ const e=validateExtraction(s.extraction,s.documents);assert.ok(e.validation.some(v=>v.document==='act'&&v.field==='basis'));
+ assert.ok(!audit(e,s.documents).findings.some(f=>f.id==='quote-act-basis'));
+ e.act.rate.value=60;assert.ok(audit(e,s.documents).findings.some(f=>f.id==='quote-act-basis'));
+});
