@@ -1,7 +1,7 @@
 export const FIELD_NAMES = {
   period: 'Период', service: 'Услуга', area: 'Площадь, м²', rate: 'Ставка, ₽/м²',
   amount: 'Сумма, ₽', vat: 'НДС', basis: 'Единица тарифа',
-  change_requires_agreement: 'Изменение по соглашению', signed: 'Подписи обеих сторон',
+  change_requires_agreement: 'Договор требует допсоглашения для изменения ставки', signed: 'Согласование обеими сторонами',
 };
 
 const cell = (type) => ({ type: 'object', additionalProperties: false, properties: {
@@ -71,6 +71,7 @@ export function validateExtraction(input, documents) {
     for (const key of Object.keys(FIELD_NAMES)) {
       const field = doc[key];
       if (!field || !Object.hasOwn(field,'value') || typeof field.quote !== 'string') throw new Error('Неполное поле: '+id+'.'+key);
+      if ((key==='change_requires_agreement'&&id!=='contract')||(key==='signed'&&id!=='amendment')) continue;
       let value = field.value;
       if (value === null) continue;
       if (numFields.includes(key) && (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1e12)) throw new Error('Недопустимое число: '+id+'.'+key);
@@ -138,11 +139,12 @@ export function audit(extraction, documents = {}) {
 
   let appliedRate=val('contract','rate');
   const amendmentText=String(documents.amendment||'').trim();
-  if (amendmentText) {
+  const amendmentRelevant=isAmendmentRelevant(extraction,documents);
+  if (amendmentRelevant) {
     if (val('amendment','signed')===true && isNum(val('amendment','rate')) && val('amendment','period') && periodR && val('amendment','period')<=periodR) {
       appliedRate=val('amendment','rate');
       checks.push({id:'amendment-applied',title:'Учтено изменение тарифа',detail:'По предоставленным сведениям: ставка '+appliedRate+' ₽/м² с '+val('amendment','period')+'. Подписи и применимость проверяет сотрудник.',evidence:evidence(['amendment','signed'],['amendment','rate'],['amendment','period'])});
-    } else missing('amendment-unclear','Изменение тарифа требует проверки','Документ об изменении загружен, но подписи, дата действия или новая ставка не подтверждены. Автоматический вывод об отсутствии основания не делается.',evidence(['amendment','signed'],['amendment','period'],['amendment','rate']));
+    } else {const review=amendmentReview(extraction,documents);missing('amendment-unclear',review.title,review.detail,evidence(...review.fields.map(field=>['amendment',field])));}
   }
   if(comparableRA&&comparableRC&&isNum(appliedRate)&&isNum(val('act','area'))&&isNum(val('act','amount'))&&val('contract','basis')==='monthly_per_m2'&&val('act','vat')&&val('act','vat')!=='unknown'&&val('act','vat')===val('contract','vat')&&val('act','rate')===null) {
     const expected=cents(val('act','area')*appliedRate)/100,difference=delta(val('act','amount'),expected);
@@ -164,7 +166,13 @@ export function audit(extraction, documents = {}) {
       } else checks.push({id:'rate-match',title:'Ставка соответствует представленным условиям',detail:appliedRate+' ₽/м² в месяц',evidence:evidence(['report','rate'],['contract','rate'])});
     }
   } else if (!isNum(appliedRate)) missing('contract-rate-missing','Не установлена договорная ставка','Добавьте договорные условия или проверьте извлечённые значения.');
-  for (const item of extraction.validation||[]) missing('quote-'+item.document+'-'+item.field,'Значение требует подтверждения',FIELD_NAMES[item.field]+': '+item.message);
+  for (const item of extraction.validation||[]) {
+    if(item.field==='change_requires_agreement'&&(item.document!=='contract'||!rateChangeNeedsReview(extraction)))continue;
+    if(item.field==='signed'&&item.document!=='amendment')continue;
+    if(item.document==='amendment'&&!amendmentRelevant)continue;
+    if(item.document==='amendment'&&findings.some(f=>f.id==='amendment-unclear'))continue;
+    missing('quote-'+item.document+'-'+item.field,'Значение требует подтверждения',FIELD_NAMES[item.field]+': '+item.message);
+  }
   if (findings.some(f=>f.id==='rate-mismatch')) questions.push('Предоставить подписанное основание изменения тарифа с датой начала действия либо пояснить расчёт начисления.');
   if (findings.some(f=>f.id==='amount-mismatch')) questions.push('Объяснить разницу между отчётом и актом за один период; при необходимости представить корректировку.');
   if (findings.some(f=>['act-math','act-contract-math'].includes(f.id))) questions.push('Уточнить площадь, ставку и корректировки в акте: сумма отличается от расчёта по представленным условиям.');
@@ -179,14 +187,14 @@ export function findingPresentation(f,extraction){
  if(value('amendment','signed')===true&&value('amendment','rate')!==null&&value('amendment','period')&&value('report','period')&&value('amendment','period')<=value('report','period'))applied=value('amendment','rate');
  const view={title:f.title,comparisons:[],summary:f.detail,nextStep:'Проверьте указанные документы и запросите у УК недостающие сведения.',needsData:f.level==='missing'};
  if(f.id==='amount-mismatch')Object.assign(view,{title:'Отчёт УК расходится с актом',comparisons:[{label:'В отчёте УК',value:rub(value('report','amount'))},{label:'В акте',value:rub(value('act','amount'))}],summary:'',nextStep:'Запросите у УК пояснение разницы и при необходимости исправленный расчёт.'});
- else if(f.id==='rate-mismatch')Object.assign(view,{title:'Ставка в отчёте УК отличается от согласованных условий',comparisons:[{label:'В отчёте УК',value:rate(value('report','rate'))},{label:'По условиям договора',value:rate(applied)}],summary:'',nextStep:'Запросите у УК основание изменения ставки: подписанное допсоглашение или пояснение расчёта.'});
+ else if(f.id==='rate-mismatch')Object.assign(view,{title:'Ставка в отчёте УК отличается от согласованных условий',comparisons:[{label:'В отчёте УК',value:rate(value('report','rate'))},{label:'По условиям договора',value:rate(applied)}],summary:value('contract','change_requires_agreement')===true?'По договору изменение ставки требует допсоглашения, подписанного обеими сторонами.':'',nextStep:'Запросите у УК основание изменения ставки или пояснение расчёта.'});
  else if(f.id==='act-contract-math')Object.assign(view,{title:'Сумма акта отличается от расчёта по договору',comparisons:[{label:'В акте',value:rub(value('act','amount'))},{label:'Площадь × ставка договора',value:rub(Math.round(value('act','area')*applied*100)/100)}],summary:'',nextStep:'Запросите расшифровку суммы акта: площадь, ставку и корректировки.'});
  else if(['report-math','act-math'].includes(f.id)){const doc=f.id==='act-math'?'act':'report';Object.assign(view,{title:doc==='act'?'Сумма акта не сходится с площадью и ставкой':'Начисление в отчёте УК не сходится с площадью и ставкой',comparisons:[{label:'В документе',value:rub(value(doc,'amount'))},{label:'Площадь × ставка',value:rub(Math.round(value(doc,'area')*value(doc,'rate')*100)/100)}],summary:'',nextStep:'Запросите у УК расчёт суммы и пояснение корректировок.'});}
  else if(f.id==='area-mismatch')Object.assign(view,{title:'Площадь в отчёте УК отличается от акта',comparisons:[{label:'В отчёте УК',value:value('report','area')+' м²'},{label:'В акте',value:value('act','area')+' м²'}],summary:'',nextStep:'Уточните у УК, какая площадь обслуживалась и почему документы различаются.'});
  else if(['vat-ra','vat-rc'].includes(f.id))Object.assign(view,{title:'Неясно, включён ли НДС в сравниваемые суммы',summary:'Порядок НДС неизвестен или различается. Сравнение сумм или ставок пока недоступно.',nextStep:'Откройте данные расхода и проверьте поля НДС. Если в документах этого нет, запросите пояснение у УК.'});
  else if(f.id==='act-missing')Object.assign(view,{title:'Для начисления не найдена сумма в акте',summary:'Без суммы акта нельзя сопоставить её с начислением в отчёте УК.',nextStep:'Проверьте, добавлен ли подходящий акт. Если его нет, запросите у УК акт за выбранный период.'});
  else if(f.id==='contract-rate-missing')Object.assign(view,{title:'Для расхода не определена договорная ставка',summary:'Пока нельзя проверить, соответствует ли начисление условиям договора.',nextStep:'Проверьте договор в данных расхода. Если условия отсутствуют, запросите их у УК.'});
- else if(f.id==='amendment-unclear')Object.assign(view,{title:'Изменение ставки не подтверждено документом',summary:'В документе об изменении не подтверждены подписи, дата начала действия или новая ставка.',nextStep:'Проверьте документ об изменении. При отсутствии подтверждения запросите у УК подписанное допсоглашение с новой ставкой и датой её применения.'});
+ else if(f.id==='amendment-unclear'){const review=amendmentReview(extraction,{});Object.assign(view,{title:review.title,summary:f.detail,nextStep:review.nextStep});}
  else if(f.id.startsWith('quote-'))Object.assign(view,{title:'Не удалось подтвердить значение по документу',nextStep:'Перейдите к данным расхода и проверьте соответствующее поле по исходному тексту. Запросите сведения у УК, если их нет в документе.'});
  return view;
 }
@@ -203,7 +211,7 @@ export function findingRequest(f,extraction,label,period){
   'vat-rc':'Просим указать, включён ли НДС в ставку отчёта и договорную ставку.',
   'act-missing':'Просим предоставить акт по этой услуге за указанный период с суммой и объёмом оказанных услуг.',
   'contract-rate-missing':'Просим предоставить договор или приложение, устанавливающее ставку и порядок расчёта этой услуги.',
-  'amendment-unclear':'Просим предоставить подписанное обеими сторонами допсоглашение с новой ставкой и датой начала её применения.'
+  'amendment-unclear':amendmentReview(extraction,{}).addDocument?'Просим предоставить подписанное обеими сторонами допсоглашение с новой ставкой и датой начала её применения.':amendmentReview(extraction,{}).fields.includes('rate')?'Просим уточнить размер новой ставки по согласованному изменению тарифа.':'Просим уточнить дату начала действия новой ставки и основание её применения в указанном месяце.'
  };
  return 'По расходу «'+label+'» за '+period+':\n'+view.title+'.\n'+facts+'\n'+(asks[f.id]||'Просим уточнить указанные сведения и предоставить подтверждающие документы и расчёт.');
 }
@@ -211,4 +219,27 @@ export function findingRequest(f,extraction,label,period){
 export function bundleRequest(items,period){
  const parts=items.flatMap(item=>audit(item.extraction,item.documents).findings.map(f=>findingRequest(f,item.extraction,item.label,period)));
  return parts.length?'Просим пояснить следующие замечания к документам за '+period+'.\n\n'+parts.map((text,i)=>(i+1)+'. '+text).join('\n\n'):'По проверенным данным замечаний для запроса в УК нет.';
+}
+
+export function rateChangeNeedsReview(extraction){
+ const report=extraction.report?.rate?.value,contract=extraction.contract?.rate?.value;
+ const normService=s=>String(s||'').toLowerCase().replace(/[^а-яёa-z0-9]/g,'');
+ const reportService=normService(extraction.report?.service?.value),contractService=normService(extraction.contract?.service?.value);
+ return typeof report==='number'&&typeof contract==='number'&&Math.abs(report-contract)>.001&&!!reportService&&reportService===contractService;
+}
+export function isAmendmentRelevant(extraction,documents){
+ if(!String(documents.amendment||'').trim())return false;
+ if(rateChangeNeedsReview(extraction))return true;
+ const val=(doc,key)=>extraction[doc]?.[key]?.value??null;
+ return val('report','service')&&String(val('report','service')).toLowerCase()===String(val('contract','service')).toLowerCase()&&val('amendment','signed')===true&&typeof val('amendment','rate')==='number'&&val('amendment','period')&&val('report','period')&&val('amendment','period')<=val('report','period');
+}
+export function amendmentReview(extraction,documents){
+ const val=(doc,key)=>extraction[doc]?.[key]?.value??null;
+ if(val('amendment','signed')!==true){
+  const notification=/уведомлени[ея]/i.test(String(documents.amendment||'').slice(0,600));
+  return {title:'Нет подтверждения согласования новой ставки',detail:(notification?'Загружено уведомление об изменении тарифа. ':'В загруженном документе об изменении тарифа ')+(notification?'Согласование новой ставки обеими сторонами не подтверждено. ':'не подтверждено согласование новой ставки обеими сторонами. ')+(val('contract','change_requires_agreement')===true?'Договор требует подписанного обеими сторонами допсоглашения.':'Уточните основание применения новой ставки.'),nextStep:val('contract','change_requires_agreement')===true?'Запросите у УК подписанное обеими сторонами допсоглашение.':'Запросите у УК документ, подтверждающий согласование новой ставки.',fields:['signed'],addDocument:true};
+ }
+ if(typeof val('amendment','rate')!=='number')return {title:'В документе не определена новая ставка',detail:'Изменение согласовано обеими сторонами, но из документа не удалось извлечь размер новой ставки. Поэтому она пока не используется в расчёте.',nextStep:'Проверьте размер ставки в документе или запросите у УК уточнение.',fields:['rate'],addDocument:false};
+ if(!val('amendment','period'))return {title:'Не определено начало действия новой ставки',detail:'Не удалось определить, с какого месяца действует согласованная ставка. Пока её нельзя применить к выбранному периоду.',nextStep:'Проверьте дату начала действия в документе или уточните её у УК.',fields:['period'],addDocument:false};
+ return {title:'Новая ставка действует с другого периода',detail:'В документе новая ставка действует с '+val('amendment','period')+', а начисление относится к '+val('report','period')+'. Для этого месяца используется прежняя ставка.',nextStep:'Проверьте дату применения ставки. Если УК применила её раньше, запросите основание такого начисления.',fields:['period'],addDocument:false};
 }
