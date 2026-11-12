@@ -16,6 +16,41 @@ export const extractionSchema = {type: 'object', additionalProperties: false, pr
   notes: {type: 'array', items: {type: 'string'}},
 }, required: ['report','act','contract','amendment','notes']};
 
+// One comparable charge per item, with explicit source IDs to prevent blending files.
+export const periodBundleSchema={type:'object',additionalProperties:false,properties:{
+ items:{type:'array',items:{type:'object',additionalProperties:false,properties:{
+  label:{type:'string'},source_ids:{type:'object',additionalProperties:false,properties:Object.fromEntries(['report','act','contract','amendment'].map(id=>[id,{type:['string','null']}])),required:['report','act','contract','amendment']},extraction:extractionSchema
+ },required:['label','source_ids','extraction']}},
+ limitations:{type:'array',items:{type:'string'}},complete:{type:'boolean'}
+},required:['items','limitations','complete']};
+
+export function validatePeriodBundle(input,sources,period){
+ if(!input||!Array.isArray(input.items)||input.items.length>20||typeof input.complete!=='boolean'||!Array.isArray(input.limitations))throw new Error('Неполный разбор комплекта.');
+ const items=input.items.map((item,index)=>{
+  const documents={},selected={};
+  for(const category of ['report','act','contract','amendment']){
+   const sourceId=item.source_ids?.[category];
+   const source=sources.find(s=>s.id===sourceId&&s.category===category);
+   if(sourceId!==null&&!source)throw new Error('Неизвестный источник в ответе ИИ.');
+   documents[category]=source?.text||'';selected[category]=source;
+  }
+  const extraction=validateExtraction(item.extraction,documents);
+  for(const category of ['report','act']){
+   const actual=extraction[category].period.value;
+   if(actual&&actual!==period)throw new Error('ИИ включил начисление другого периода. Проверьте комплект и повторите.');
+  }
+  for(const category of ['report','act','contract','amendment'])for(const field of Object.values(extraction[category])){
+   if(field.value===null||!selected[category])continue;
+   const text=norm(selected[category].text),quote=norm(field.quote),pos=text.indexOf(quote),before=text.slice(0,pos);
+   const pages=[...before.matchAll(/Страница (\d+)/g)],sheets=[...before.matchAll(/Лист ([^ ]+)/g)];
+   field.source={id:selected[category].id,name:selected[category].name,location:pages.length?'страница '+pages.at(-1)[1]:sheets.length?sheets.at(-1)[0]:'текст документа'};
+  }
+  const label=String(item.label||extraction.report.service.value||extraction.act.service.value||'Расход '+(index+1)).slice(0,240);
+  return {id:'charge-'+index,label,extraction,documents};
+ });
+ return {items,complete:input.complete,limitations:input.limitations.filter(x=>typeof x==='string').map(x=>x.slice(0,1000)).slice(0,30)};
+}
+
 export function blankDocument() {
   return Object.fromEntries(Object.keys(FIELD_NAMES).map(key => [key,{value: null,quote: ''}]));
 }
@@ -62,7 +97,7 @@ export function validateExtraction(input, documents) {
 export function audit(extraction, documents = {}) {
   const findings = [], checks = [], questions = [];
   const val = (id,key) => extraction[id]?.[key]?.value ?? null;
-  const evidence = (...items) => items.map(([document,field])=>({document,field,quote:extraction[document]?.[field]?.quote||'',manual:!!extraction[document]?.[field]?.manual}));
+  const evidence = (...items) => items.map(([document,field])=>({document,field,quote:extraction[document]?.[field]?.quote||'',source:extraction[document]?.[field]?.source,manual:!!extraction[document]?.[field]?.manual}));
   const rub = amount => new Intl.NumberFormat('ru-RU',{maximumFractionDigits:2}).format(amount)+' ₽';
   const cents = n => Math.round((n+Number.EPSILON)*100);
   const delta = (a,b) => (cents(a)-cents(b))/100;
