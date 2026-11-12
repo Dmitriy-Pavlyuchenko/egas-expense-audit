@@ -170,3 +170,45 @@ export function audit(extraction, documents = {}) {
   if (findings.some(f=>['act-math','act-contract-math'].includes(f.id))) questions.push('Уточнить площадь, ставку и корректировки в акте: сумма отличается от расчёта по представленным условиям.');
   return {findings,checks,questions,notice:'Замечания относятся к предоставленному комплекту. Связанные разницы не складываются. Экономия, переплата и нарушение не установлены автоматически.'};
 }
+
+export function findingPresentation(f,extraction){
+ const value=(doc,key)=>extraction[doc]?.[key]?.value??null;
+ const rub=n=>typeof n==='number'?new Intl.NumberFormat('ru-RU',{maximumFractionDigits:2}).format(n)+' ₽':'Не определено';
+ const rate=n=>typeof n==='number'?rub(n)+'/м² в месяц':'Не определена';
+ let applied=value('contract','rate');
+ if(value('amendment','signed')===true&&value('amendment','rate')!==null&&value('amendment','period')&&value('report','period')&&value('amendment','period')<=value('report','period'))applied=value('amendment','rate');
+ const view={title:f.title,comparisons:[],summary:f.detail,nextStep:'Проверьте указанные документы и запросите у УК недостающие сведения.',needsData:f.level==='missing'};
+ if(f.id==='amount-mismatch')Object.assign(view,{title:'Отчёт УК расходится с актом',comparisons:[{label:'В отчёте УК',value:rub(value('report','amount'))},{label:'В акте',value:rub(value('act','amount'))}],summary:'',nextStep:'Запросите у УК пояснение разницы и при необходимости исправленный расчёт.'});
+ else if(f.id==='rate-mismatch')Object.assign(view,{title:'Ставка в отчёте УК отличается от согласованных условий',comparisons:[{label:'В отчёте УК',value:rate(value('report','rate'))},{label:'По условиям договора',value:rate(applied)}],summary:'',nextStep:'Запросите у УК основание изменения ставки: подписанное допсоглашение или пояснение расчёта.'});
+ else if(f.id==='act-contract-math')Object.assign(view,{title:'Сумма акта отличается от расчёта по договору',comparisons:[{label:'В акте',value:rub(value('act','amount'))},{label:'Площадь × ставка договора',value:rub(Math.round(value('act','area')*applied*100)/100)}],summary:'',nextStep:'Запросите расшифровку суммы акта: площадь, ставку и корректировки.'});
+ else if(['report-math','act-math'].includes(f.id)){const doc=f.id==='act-math'?'act':'report';Object.assign(view,{title:doc==='act'?'Сумма акта не сходится с площадью и ставкой':'Начисление в отчёте УК не сходится с площадью и ставкой',comparisons:[{label:'В документе',value:rub(value(doc,'amount'))},{label:'Площадь × ставка',value:rub(Math.round(value(doc,'area')*value(doc,'rate')*100)/100)}],summary:'',nextStep:'Запросите у УК расчёт суммы и пояснение корректировок.'});}
+ else if(f.id==='area-mismatch')Object.assign(view,{title:'Площадь в отчёте УК отличается от акта',comparisons:[{label:'В отчёте УК',value:value('report','area')+' м²'},{label:'В акте',value:value('act','area')+' м²'}],summary:'',nextStep:'Уточните у УК, какая площадь обслуживалась и почему документы различаются.'});
+ else if(['vat-ra','vat-rc'].includes(f.id))Object.assign(view,{title:'Неясно, включён ли НДС в сравниваемые суммы',summary:'Порядок НДС неизвестен или различается. Сравнение сумм или ставок пока недоступно.',nextStep:'Откройте данные расхода и проверьте поля НДС. Если в документах этого нет, запросите пояснение у УК.'});
+ else if(f.id==='act-missing')Object.assign(view,{title:'Для начисления не найдена сумма в акте',summary:'Без суммы акта нельзя сопоставить её с начислением в отчёте УК.',nextStep:'Проверьте, добавлен ли подходящий акт. Если его нет, запросите у УК акт за выбранный период.'});
+ else if(f.id==='contract-rate-missing')Object.assign(view,{title:'Для расхода не определена договорная ставка',summary:'Пока нельзя проверить, соответствует ли начисление условиям договора.',nextStep:'Проверьте договор в данных расхода. Если условия отсутствуют, запросите их у УК.'});
+ else if(f.id==='amendment-unclear')Object.assign(view,{title:'Изменение ставки не подтверждено документом',summary:'В документе об изменении не подтверждены подписи, дата начала действия или новая ставка.',nextStep:'Проверьте документ об изменении. При отсутствии подтверждения запросите у УК подписанное допсоглашение с новой ставкой и датой её применения.'});
+ else if(f.id.startsWith('quote-'))Object.assign(view,{title:'Не удалось подтвердить значение по документу',nextStep:'Перейдите к данным расхода и проверьте соответствующее поле по исходному тексту. Запросите сведения у УК, если их нет в документе.'});
+ return view;
+}
+
+export function findingRequest(f,extraction,label,period){
+ const view=findingPresentation(f,extraction);
+ const facts=view.comparisons.length?view.comparisons.map(c=>c.label+': '+c.value).join('. ')+'.':view.summary;
+ const asks={
+  'amount-mismatch':'Просим пояснить разницу между отчётом и актом и предоставить расшифровку начисления. При ошибке просим направить исправленный расчёт.',
+  'rate-mismatch':'Просим предоставить основание изменения ставки, включая подписанное допсоглашение и дату начала применения новой ставки, либо пояснить расчёт.',
+  'act-contract-math':'Просим предоставить расшифровку суммы акта с площадью, ставкой и всеми корректировками.',
+  'area-mismatch':'Просим уточнить фактическую обслуживаемую площадь и пояснить различие между отчётом и актом.',
+  'vat-ra':'Просим указать, включён ли НДС в сумму отчёта и сумму акта, и привести суммы к сопоставимому виду.',
+  'vat-rc':'Просим указать, включён ли НДС в ставку отчёта и договорную ставку.',
+  'act-missing':'Просим предоставить акт по этой услуге за указанный период с суммой и объёмом оказанных услуг.',
+  'contract-rate-missing':'Просим предоставить договор или приложение, устанавливающее ставку и порядок расчёта этой услуги.',
+  'amendment-unclear':'Просим предоставить подписанное обеими сторонами допсоглашение с новой ставкой и датой начала её применения.'
+ };
+ return 'По расходу «'+label+'» за '+period+':\n'+view.title+'.\n'+facts+'\n'+(asks[f.id]||'Просим уточнить указанные сведения и предоставить подтверждающие документы и расчёт.');
+}
+
+export function bundleRequest(items,period){
+ const parts=items.flatMap(item=>audit(item.extraction,item.documents).findings.map(f=>findingRequest(f,item.extraction,item.label,period)));
+ return parts.length?'Просим пояснить следующие замечания к документам за '+period+'.\n\n'+parts.map((text,i)=>(i+1)+'. '+text).join('\n\n'):'По проверенным данным замечаний для запроса в УК нет.';
+}
