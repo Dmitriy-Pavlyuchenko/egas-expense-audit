@@ -28,10 +28,8 @@ function fieldTable(){let count=0;const visible=['period','service','area','rate
 function evidenceButtons(evidence){const unique=[];for(const e of evidence||[]){if(!unique.some(u=>u.document===e.document&&u.field===e.field))unique.push(e);}return unique.map(e=>'<button class="evidence-button" type="button" data-field-doc="'+esc(e.document)+'" data-field-key="'+esc(e.field)+'">'+esc(docNames[e.document])+': '+esc(FIELD_NAMES[e.field])+(e.manual?' · вручную':'')+'</button>').join('');}
 function renderResults(){if(!state.extraction)return;updateSteps();state.result=audit(state.extraction,activeDocuments());if(state.cases.length){const item=state.cases[state.activeCase];item.extraction=state.extraction;item.review=state.review;item.notes=state.notes;}renderBundleContext();const result=state.result;
   $('results-content').hidden=false;$('results-empty').hidden=true;$('result-mode').textContent=state.mode==='ai'?'Извлечено ИИ · '+state.model:'Учебный режим';
-  $('case-origin').textContent=state.mode==='ai'?'Данные выбранного расхода извлечены ИИ из комплекта. Проверьте значения, источники и сопоставление документов.':'Учебная сверка: значения подготовлены заранее, ИИ-запрос не выполнялся. '+(state.sampleId==='clean'?'Синтетический контрольный пример с исправленными суммами и явно указанным НДС.':'Фрагменты переписки приведены к единому формату; это не исходные файлы Ирины. НДС отчёта требует уточнения.');
-  $('values-origin').textContent=$('case-origin').textContent;
   $('summary-report').textContent=money(state.extraction.report.amount.value);$('summary-act').textContent=money(state.extraction.act.amount.value);$('summary-findings').textContent=String(result.findings.filter(f=>!['confirmed','dismissed'].includes(state.review[f.id])).length);
-  fieldTable();const missing=result.findings.filter(f=>f.level==='missing');$('incomplete-summary').hidden=!missing.length;$('incomplete-summary').textContent='Не хватает подтверждений: '+missing.length+'. Нажмите на соответствующее значение, чтобы проверить источник или внести уточнение.';
+  fieldTable();renderReviewTasks();
   $('findings-count').textContent=result.findings.length+' замечаний';
   $('findings').innerHTML=result.findings.length?result.findings.map(f=>{
     const review=state.review[f.id]||'pending';
@@ -56,7 +54,7 @@ async function extract(){
  try{
   const response=await fetch('/api/extract',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({mode:'period',period,sources})});
   const r=await response.json();if(!response.ok)throw new Error(r.error||'Не удалось разобрать комплект.');
-  state.cases=r.bundle.items.map(item=>({...item,review:{},notes:{}}));state.bundleInfo={period,complete:r.bundle.complete,limitations:r.bundle.limitations,skipped:Object.keys(docNames).filter(id=>!sources.some(s=>s.category===id))};state.mode='ai';state.model=r.model;state.activeCase=-1;selectCase(0);showStep(2);message('Разбор завершён. Проверьте каждый выделенный расход и ограничения охвата.','success');
+  state.cases=r.bundle.items.map(item=>({...item,review:{},notes:{}}));state.bundleInfo={period,complete:r.bundle.complete,limitations:r.bundle.limitations,skipped:Object.keys(docNames).filter(id=>!sources.some(s=>s.category===id))};state.mode='ai';state.model=r.model;state.activeCase=-1;selectCase(0);showStep(2);message('');
  }catch(error){message(error.message,'error');}finally{setBusy(false);}
 }
 
@@ -125,9 +123,36 @@ function renderAttachments(){const files=state.attachments[state.active];$('atta
 document.addEventListener('click',event=>{const button=event.target.closest('[data-remove-file]');if(!button||state.busy)return;if(!confirm('Удалить этот документ из комплекта?'))return;state.attachments[state.active]=state.attachments[state.active].filter(f=>f.id!==button.dataset.removeFile);state.sampleId=null;invalidate();renderAttachments();});
 $('audit-period').addEventListener('change',()=>{state.sampleId=null;invalidate();message('');});
 function selectCase(index){if(state.cases[state.activeCase]){const previous=state.cases[state.activeCase];previous.extraction=state.extraction||previous.extraction;previous.review=state.review;previous.notes=state.notes;}state.activeCase=index;const item=state.cases[index];state.extraction=item.extraction;state.review=item.review;state.notes=item.notes;renderResults();}
-function renderBundleContext(){if(!state.bundleInfo)return;const info=state.bundleInfo;document.querySelectorAll('.charge-picker').forEach(select=>{select.innerHTML=state.cases.map((item,index)=>'<option value="'+index+'">'+esc(item.label)+'</option>').join('');select.value=String(state.activeCase);});const coverage='Период: '+info.period+'. Выделено расходов: '+state.cases.length+'. '+(info.complete?'Проверьте полноту сопоставления с исходными документами.':'Частичный разбор: не все расходы или связи подтверждены.')+(info.skipped.length?' Не добавлены: '+info.skipped.map(id=>docNames[id]).join(', ')+'.':'')+(info.limitations.length?' Ограничения ИИ (требуют проверки): '+info.limitations.join(' '):'');document.querySelectorAll('.bundle-coverage').forEach(el=>el.textContent=coverage);document.querySelectorAll('.charge-caption').forEach(el=>el.textContent='Сейчас показан расход: '+state.cases[state.activeCase].label+'.');}
-document.querySelectorAll('.charge-picker').forEach(el=>el.addEventListener('change',()=>selectCase(Number(el.value))));
-function wholeBundleText(request=false){if(!state.cases.length)return request?singleRequestText():singleReportText();const current={extraction:state.extraction,review:state.review,notes:state.notes,result:state.result};try{return ['EGAS — комплект за '+state.bundleInfo.period,document.querySelector('.bundle-coverage').textContent,...state.cases.map(item=>{state.extraction=item.extraction;state.review=item.review;state.notes=item.notes;state.result=audit(item.extraction,item.documents);return '\nРАСХОД: '+item.label+'\n'+(request?singleRequestText():singleReportText());})].join('\n\n');}finally{Object.assign(state,current);}}
+function renderBundleContext(){
+ if(!state.bundleInfo)return;const info=state.bundleInfo;
+ document.querySelectorAll('.charge-list').forEach(list=>{list.innerHTML=state.cases.map((item,index)=>{
+  const amount=item.extraction.report.amount.value,actAmount=item.extraction.act.amount.value;
+  return '<button type="button" class="charge-choice" data-choose-charge="'+index+'" aria-pressed="'+(index===state.activeCase)+'"><strong>'+esc(item.label)+'</strong><span>'+(typeof amount==='number'?esc(money(amount))+' в отчёте':typeof actAmount==='number'?esc(money(actAmount))+' в акте':'Сумма не определена')+'</span></button>';
+ }).join('');});
+ const period=new Intl.DateTimeFormat('ru-RU',{month:'long',year:'numeric',timeZone:'UTC'}).format(new Date(info.period+'-01T00:00:00Z'));
+ document.querySelectorAll('.bundle-overview').forEach(el=>el.textContent=period+' · Найдено расходов: '+state.cases.length);
+ document.querySelectorAll('.selected-charge-title').forEach(el=>el.textContent=state.cases[state.activeCase].label);
+ document.querySelectorAll('.coverage-warning').forEach(el=>{const parts=[];if(!info.complete)parts.push('Разобрана часть комплекта: некоторые расходы или связи не удалось определить.');if(info.skipped.length)parts.push('Не добавлены: '+info.skipped.map(id=>docNames[id]).join(', ')+'. Доступны только проверки по загруженным документам.');el.textContent=parts.join(' ');el.hidden=!parts.length;});
+}
+document.addEventListener('click',event=>{const button=event.target.closest('[data-choose-charge]');if(button&&!state.busy){const panel=button.closest('.charge-list');selectCase(Number(button.dataset.chooseCharge));panel.querySelector('[aria-pressed="true"]').focus();}});
+function renderReviewTasks(){
+ const tasks=state.result.findings.filter(f=>f.level==='missing');$('review-tasks').hidden=!tasks.length;
+ $('review-task-list').innerHTML=tasks.map(f=>{
+  const validation=(state.extraction.validation||[]).find(item=>f.id==='quote-'+item.document+'-'+item.field);
+  const refs=validation?[{document:validation.document,field:validation.field}]:f.evidence||[];
+  const absent=refs.find(ref=>!activeDocuments()[ref.document]?.trim());
+  let title=f.title,explanation=f.detail,actions='';
+  if(validation){title=docNames[validation.document]+': '+FIELD_NAMES[validation.field].toLowerCase()+' не подтверждено';explanation=validation.message+' Откройте поле и сверьте его с документом. Если оснований нет, оставьте значение неизвестным.';if(validation.document==='contract'&&validation.field==='period'){title='Период договора не определён';explanation='ИИ не распознал конкретный месяц услуги в договоре. Если договор действует несколько месяцев, оставьте это поле пустым: сравнение отчёта и акта от него не зависит.';}}
+  if(f.id==='vat-ra')explanation='Неясно, включён ли НДС в сумму отчёта и акта. Поэтому разница между этими суммами пока не рассчитана. Откройте поля НДС и уточните их только по документам.';
+  if(f.id==='vat-rc')explanation='Порядок НДС в отчёте и договоре неизвестен или различается. Поэтому ставки пока нельзя сравнить. Проверьте, включён ли НДС в обе ставки.';
+  if(f.id==='period-missing')explanation='Не определён месяц услуги в отчёте или акте. Без него нельзя сравнивать суммы за один период. Откройте поля периода и проверьте их по документам.';
+  if(f.id==='act-missing'||f.id==='contract-rate-missing'||absent){const category=absent?.document||(f.id==='act-missing'?'act':'contract');if(!activeDocuments()[category]?.trim()){explanation=category==='act'?'К этому расходу не сопоставлен акт. Разницу между отчётом и актом пока нельзя определить. Проверьте загруженные акты или добавьте подходящий документ. Можно продолжить с этим ограничением.':'К этому расходу не сопоставлен договор. Проверить начисление по договорной ставке пока нельзя. Проверьте загруженные договоры или добавьте подходящий документ. Можно продолжить с этим ограничением.';actions='<button type="button" class="secondary-button" data-add-source="'+category+'">Открыть документы: '+esc(docNames[category])+'</button>';}}
+  if(!actions){const targets=refs.length?refs:f.id==='contract-rate-missing'?[{document:'contract',field:'rate'}]:f.id==='act-missing'?[{document:'act',field:'amount'}]:[];const seen=new Set();actions=targets.filter(ref=>{const key=ref.document+'.'+ref.field;if(seen.has(key))return false;seen.add(key);return true;}).map(ref=>'<button type="button" class="secondary-button" data-field-doc="'+esc(ref.document)+'" data-field-key="'+esc(ref.field)+'">'+esc(docNames[ref.document])+': '+esc(FIELD_NAMES[ref.field])+'</button>').join('');}
+  return '<article class="review-task"><h4>'+esc(title)+'</h4><p>'+esc(explanation)+'</p><div class="review-task-actions">'+actions+'</div></article>';
+ }).join('');
+}
+document.addEventListener('click',event=>{const button=event.target.closest('[data-add-source]');if(button){showStep(1);selectDocument(button.dataset.addSource);$('document-text').focus();}});
+function wholeBundleText(request=false){if(!state.cases.length)return request?singleRequestText():singleReportText();const current={extraction:state.extraction,review:state.review,notes:state.notes,result:state.result};try{return ['EGAS — комплект за '+state.bundleInfo.period,document.querySelector('.bundle-overview').textContent+(state.bundleInfo.complete?'':'\nЧастичный разбор комплекта.')+(state.bundleInfo.skipped.length?'\nНе добавлены: '+state.bundleInfo.skipped.map(id=>docNames[id]).join(', '):'')+'\nОграничения ИИ (требуют проверки): '+state.bundleInfo.limitations.join(' '),...state.cases.map(item=>{state.extraction=item.extraction;state.review=item.review;state.notes=item.notes;state.result=audit(item.extraction,item.documents);return '\nРАСХОД: '+item.label+'\n'+(request?singleRequestText():singleReportText());})].join('\n\n');}finally{Object.assign(state,current);}}
 function reportText(){return wholeBundleText(false);}
 function requestText(){return wholeBundleText(true);}
 
